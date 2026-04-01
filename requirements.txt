@@ -3,7 +3,5 @@ pandas
 numpy
 plotly
 scipy
-fuzzywuzzy
-python-Levenshtein
 scikit-learn
 openpyxl
