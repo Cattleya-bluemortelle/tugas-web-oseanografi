@@ -4,65 +4,109 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.signal import butter, filtfilt
 
-# Konfigurasi Halaman
-st.set_page_config(page_title="Oceanic Data Refinery", layout="wide")
+# --- KONFIGURASI NAMA APLIKASI ---
+st.set_page_config(page_title="Ocean Dynamics Hub", layout="wide")
+st.title("📊 Ocean Dynamics Hub")
+st.markdown("*Platform Analisis Parameter Fisik Gelombang dan Arus Laut*")
 
-st.title("🌊 Oceanic Data Refinery")
-st.markdown("Aplikasi web ini memproses data mentah oseanografi menjadi data siap analisis menggunakan metode statistik dan pembersihan sinyal.")
+# --- SIDEBAR: INPUT & SETTING ---
+st.sidebar.header("⚙️ Pengaturan Analisis")
+uploaded_file = st.sidebar.file_uploader("Unggah Data (CSV/Excel)", type=["csv", "xlsx"])
+depth = st.sidebar.number_input("Kedalaman Laut (meter)", min_value=0.1, value=10.0, help="Diperlukan untuk klasifikasi jenis gelombang")
 
-# --- SIDEBAR ---
-st.sidebar.header("Opsi Pengolahan Data")
-uploaded_file = st.sidebar.file_uploader("Upload file data_arus.csv", type=["csv"])
+# --- FUNGSI FISIKA & FILTER ---
+def butter_lowpass_filter(data, cutoff=0.1, fs=1.0, order=2):
+    nyq = 0.5 * fs
+    normal_cutoff = cutoff / nyq
+    b, a = butter(order, normal_cutoff, btype='low', analog=False)
+    return filtfilt(b, a, data)
 
-# Jika belum ada file, buat data simulasi agar dosen bisa langsung lihat demo
-if uploaded_file is not None:
-    # Membaca file dengan desimal titik (.) sesuai settingan Excelmu
-    df = pd.read_csv(uploaded_file, decimal='.')
+def calculate_physics(df, wave_col, d):
+    g, rho = 9.81, 1025
+    raw = df[wave_col].dropna().values
+    clean = butter_lowpass_filter(raw)
+    
+    # Statistik Tinggi
+    hs = 4 * np.std(clean)
+    hrms = hs / np.sqrt(2)
+    energy = 0.125 * rho * g * (hrms**2)
+    
+    # Estimasi Panjang & Jenis Gelombang (Teori Airy)
+    T = 8.0 # Estimasi periode rata-rata
+    L0 = (g * T**2) / (2 * np.pi)
+    L = L0 * np.tanh(np.sqrt((4 * np.pi**2 * d) / (g * T)))
+    ratio = d / L
+    
+    if ratio < 0.05: jenis = "Perairan Dangkal (Shallow Water)"
+    elif ratio > 0.5: jenis = "Perairan Dalam (Deep Water)"
+    else: jenis = "Perairan Transisi (Intermediate)"
+    
+    return raw, clean, hs, hrms, energy, jenis, L
+
+# --- LOGIKA UTAMA ---
+if uploaded_file:
+    try:
+        # Membaca file
+        df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
+        st.sidebar.success(f"File '{uploaded_file.name}' dimuat.")
+        
+        # Deteksi Kolom Otomatis
+        cols = [c.lower() for c in df.columns]
+        wave_col = next((df.columns[i] for i, c in enumerate(cols) if any(k in c for k in ['elev', 'sea', 'z', 'water'])), None)
+        u_col = next((df.columns[i] for i, c in enumerate(cols) if any(k in c for k in ['u_', 'vel_x', 'east', 'arus_u'])), None)
+        v_col = next((df.columns[i] for i, c in enumerate(cols) if any(k in c for k in ['v_', 'vel_y', 'north', 'arus_v'])), None)
+
+        if st.button("🚀 Jalankan Analisis Komprehensif"):
+            tab_names = []
+            if wave_col: tab_names.append("🌊 Gelombang")
+            if u_col and v_col: tab_names.append("🏹 Arus")
+            
+            if not tab_names:
+                st.error("Kolom data tidak terdeteksi. Gunakan nama kolom standar (u, v, elevasi).")
+            else:
+                tabs = st.tabs(tab_names)
+                
+                # --- ANALISIS GELOMBANG ---
+                if wave_col:
+                    with tabs[0]:
+                        raw, clean, hs, hrms, energy, jenis, L = calculate_physics(df, wave_col, depth)
+                        
+                        st.subheader("Analisis Fisika Gelombang")
+                        m1, m2, m3 = st.columns(3)
+                        m1.metric("Significant Height (Hs)", f"{hs:.2f} m")
+                        m2.metric("RMS Height (Hrms)", f"{hrms:.2f} m")
+                        m3.metric("Rapat Energi", f"{energy:.1f} J/m²")
+                        
+                        st.info(f"**Klasifikasi Terdeteksi:** {jenis} (L ≈ {L:.2f} m)")
+                        
+                        fig1, ax1 = plt.subplots(figsize=(12, 4))
+                        ax1.plot(raw, color='lightgray', alpha=0.5, label='Raw Signal')
+                        ax1.plot(clean, color='#0077b6', linewidth=2, label='Filtered (Clean)')
+                        ax1.set_ylabel("Elevation (m)")
+                        ax1.set_title("Perbandingan Sinyal Elevasi Permukaan Laut")
+                        ax1.legend()
+                        st.pyplot(fig1)
+
+                # --- ANALISIS ARUS ---
+                if u_col and v_col:
+                    idx = tab_names.index("🏹 Arus")
+                    with tabs[idx]:
+                        st.subheader("Distribusi Vektor Arus (Quiver Plot)")
+                        u, v = df[u_col].values, df[v_col].values
+                        mag = np.sqrt(u**2 + v**2)
+                        
+                        fig2, ax2 = plt.subplots(figsize=(10, 6))
+                        # Membuat koordinat sederhana jika tidak ada kolom X, Y
+                        x = np.linspace(0, 10, len(u))
+                        y = np.sin(x) # Hanya untuk sebaran visual
+                        
+                        q = ax2.quiver(x, y, u, v, mag, cmap='YlGnBu')
+                        plt.colorbar(q, label='Velocity (m/s)')
+                        ax2.set_title("Vektor Kecepatan dan Arah Arus")
+                        st.pyplot(fig2)
+                        st.success(f"Kecepatan Arus Rata-rata: {np.mean(mag):.3f} m/s")
+
+    except Exception as e:
+        st.error(f"Gagal memproses data: {e}")
 else:
-    st.sidebar.warning("Silakan upload data_arus.csv. Menampilkan data demo...")
-    t = np.linspace(0, 50, 500)
-    elevasi_noisy = np.sin(0.5 * t) + np.random.normal(0, 0.3, 500)
-    df = pd.DataFrame({
-        'waktu': t,
-        'elevasi': elevasi_noisy,
-        'x': np.repeat(np.arange(5), 5),
-        'y': np.tile(np.arange(5), 5),
-        'u': np.random.uniform(-0.5, 0.5, 25),
-        'v': np.random.uniform(-0.5, 0.5, 25)
-    })
-
-tabs = st.tabs(["📊 Filter Gelombang", "🏹 Vektor Arus (Quiver)"])
-
-# --- TAB 1: FILTERING ---
-with tabs[0]:
-    st.header("Metode Pembersihan Noise (Butterworth Filter)")
-    st.write("Data mentah dari sensor seringkali memiliki gangguan (noise). Kita menggunakan Low-pass filter untuk mendapatkan sinyal murni.")
-    
-    cutoff = st.slider("Atur Kehalusan (Cutoff Frequency)", 0.01, 0.5, 0.1)
-    
-    # Proses filtering
-    b, a = butter(3, cutoff)
-    df['elevasi_filtered'] = filtfilt(b, a, df['elevasi'])
-    
-    fig1, ax1 = plt.subplots(figsize=(10, 4))
-    ax1.plot(df['elevasi'], label="Data Mentah (Noisy)", color='lightgray', alpha=0.6)
-    ax1.plot(df['elevasi_filtered'], label="Hasil Filter (Clean)", color='blue', linewidth=2)
-    ax1.set_title("Analisis Perbandingan Sinyal")
-    ax1.legend()
-    st.pyplot(fig1)
-
-# --- TAB 2: QUIVER ---
-with tabs[1]:
-    st.header("Visualisasi Vektor Arus Spasial")
-    st.write("Quiver plot menunjukkan arah dan kekuatan arus di berbagai koordinat.")
-    
-    fig2, ax2 = plt.subplots(figsize=(8, 6))
-    magnitude = np.sqrt(df['u']**2 + df['v']**2)
-    q = ax2.quiver(df['x'], df['y'], df['u'], df['v'], magnitude, cmap='jet')
-    plt.colorbar(q, label='Kecepatan Arus (m/s)')
-    ax2.set_xlabel("Koordinat X")
-    ax2.set_ylabel("Koordinat Y")
-    st.pyplot(fig2)
-
-st.markdown("---")
-st.caption("Dikembangkan oleh: cattleya-bluemortelle | Matkul Analisis Data Oseanografi")
+    st.info("👋 Selamat Datang di Ocean Dynamics Hub. Silakan unggah data Anda di sidebar.")
