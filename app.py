@@ -2,145 +2,358 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from scipy import signal
-from sklearn.linear_model import LinearRegression
+from plotly.subplots import make_subplots
+import plotly.express as px
+from scipy import signal, stats
+from scipy.fft import fft, fftfreq
+from scipy.interpolate import interp1d
+from scipy.optimize import curve_fit
+from fuzzywuzzy import fuzz
+from sklearn.preprocessing import StandardScaler
+import warnings
+warnings.filterwarnings('ignore')
 
-# --- KONFIGURASI HALAMAN ---
+# Konfigurasi halaman
 st.set_page_config(
-    page_title="Ocean Dynamics Hub",
+    page_title="HydroData Cleaner",
     page_icon="🌊",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# Custom CSS untuk tampilan profesional
 st.markdown("""
-    <style>
-    .main { background-color: #0e1117; }
-    .stMetric { background-color: #161b22; padding: 15px; border-radius: 10px; border: 1px solid #30363d; }
-    div.stButton > button:first-child {
-        background-color: #00f2ff; color: #0e1117; font-weight: bold; border-radius: 20px; width: 100%;
-        border: none; padding: 10px 20px;
+# 🌊 **HydroData Cleaner & Visualizer**
+*Smart Noise Removal untuk Water Level, Salinitas, & Suhu*
+""")
+
+class HydroDataProcessor:
+    def __init__(self, df):
+        self.df = df.copy()
+        self.original_df = df.copy()
+        self.detected_columns = self._smart_column_detection()
+    
+    def _smart_column_detection(self):
+        """Smart column detection dengan fuzzy matching"""
+        keywords = {
+            'water_level': ['water_level', 'wl', 'elev', 'elevation', 'height', 'z', 'eta'],
+            'salinity': ['sal', 'salinity', 'salin', 'pss'],
+            'temperature': ['temp', 'temperature', 'suhu', 't'],
+            'time': ['time', 'datetime', 'date', 'waktu']
+        }
+        
+        mapping = {}
+        for col in self.df.columns:
+            col_lower = str(col).lower()
+            best_score = 0
+            best_type = None
+            
+            for data_type, words in keywords.items():
+                for word in words:
+                    score = fuzz.ratio(col_lower, word)
+                    if score > best_score:
+                        best_score = score
+                        best_type = data_type
+            
+            if best_score > 25:
+                mapping[col] = best_type
+        
+        return mapping
+    
+    def detect_outliers(self, data, method='iqr'):
+        """Deteksi outlier dengan berbagai metode"""
+        if method == 'iqr':
+            Q1 = np.percentile(data, 25)
+            Q3 = np.percentile(data, 75)
+            IQR = Q3 - Q1
+            lower = Q1 - 1.5 * IQR
+            upper = Q3 + 1.5 * IQR
+            outliers = (data < lower) | (data > upper)
+        elif method == 'zscore':
+            z = np.abs(stats.zscore(data))
+            outliers = z > 3
+        return outliers
+    
+    def auto_noise_removal(self, data, time):
+        """Sistem otomatis pilih metode terbaik untuk noise removal"""
+        # Deteksi tipe noise
+        outliers_iqr = np.sum(self.detect_outliers(data, 'iqr'))
+        outliers_zscore = np.sum(self.detect_outliers(data, 'zscore'))
+        data_std = np.std(np.diff(data))
+        
+        # Strategi otomatis
+        if outliers_iqr > len(data) * 0.1:  # Banyak outlier
+            cleaned = self.remove_outliers(data.copy())
+            method = "Outlier Removal (IQR)"
+        elif data_std > np.std(data) * 0.5:  # High frequency noise
+            cleaned = self.low_pass_filter(data, fs=1.0)
+            method = "Low-pass Filter"
+        else:  # Mild noise
+            cleaned = self.moving_average(data, window=5)
+            method = "Moving Average"
+        
+        return cleaned, method
+    
+    def remove_outliers(self, data):
+        """Hapus outlier dan interpolasi"""
+        outliers = self.detect_outliers(data)
+        data_clean = data.copy()
+        data_clean[outliers] = np.nan
+        return pd.Series(data_clean).interpolate(method='linear').values
+    
+    def moving_average(self, data, window=5):
+        """Moving average smoothing"""
+        return pd.Series(data).rolling(window=window, center=True).mean().fillna(method='bfill').fillna(method='ffill').values
+    
+    def low_pass_filter(self, data, cutoff=0.1, fs=1.0):
+        """Low-pass Butterworth filter"""
+        nyquist = fs / 2
+        normal_cutoff = cutoff / nyquist
+        b, a = signal.butter(4, normal_cutoff, btype='low')
+        return signal.filtfilt(b, a, data)
+    
+    def band_pass_filter(self, data, lowcut=0.05, highcut=0.3, fs=1.0):
+        """Band-pass filter"""
+        nyquist = fs / 2
+        low = lowcut / nyquist
+        high = highcut / nyquist
+        b, a = signal.butter(4, [low, high], btype='band')
+        return signal.filtfilt(b, a, data)
+    
+    def high_pass_filter(self, data, cutoff=0.05, fs=1.0):
+        """High-pass filter"""
+        nyquist = fs / 2
+        normal_cutoff = cutoff / nyquist
+        b, a = signal.butter(4, normal_cutoff, btype='high')
+        return signal.filtfilt(b, a, data)
+    
+    def interpolate_data(self, data):
+        """Interpolasi linear"""
+        return pd.Series(data).interpolate(method='linear').fillna(method='bfill').fillna(method='ffill').values
+    
+    def curve_fit_sine(self, x, y):
+        """Curve fitting dengan fungsi sine"""
+        def sine_func(x, A, B, C, D):
+            return A * np.sin(B * x + C) + D
+        
+        try:
+            popt, _ = curve_fit(sine_func, x, y, maxfev=5000)
+            return sine_func(x, *popt)
+        except:
+            return y
+
+def create_visualization(df, processor, selected_col):
+    """Buat visualisasi lengkap"""
+    col_data = df[selected_col].dropna()
+    time_idx = np.arange(len(col_data))
+    
+    # Auto cleaning
+    cleaned_data, method = processor.auto_noise_removal(col_data.values, time_idx)
+    
+    # Multiple methods untuk comparison
+    methods = {
+        'Original': col_data.values,
+        f'Auto-Clean ({method})': cleaned_data,
+        'Moving Avg (5)': processor.moving_average(col_data.values),
+        'Low-pass': processor.low_pass_filter(col_data.values),
+        'Interpolation': processor.interpolate_data(col_data.values)
     }
-    .stAlert { border-radius: 10px; }
-    </style>
-    """, unsafe_allow_html=True)
-
-# --- FUNGSI SMART CLEANER (LOGIKA OTOMATIS) ---
-def smart_cleaner(data):
-    # Konversi ke numerik & tangani data kosong (Interpolasi)
-    series = pd.to_numeric(data, errors='coerce')
-    gap_count = series.isnull().sum()
     
-    # Interpolasi dan pembersihan data kosong versi Pandas Terbaru
-    series = series.interpolate(method='linear').bfill().ffill()
+    # Plot
+    fig = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=('Data Original vs Auto-Cleaned', 'Comparison Methods', 
+                       'Frequency Spectrum', 'Residual Analysis'),
+        specs=[[{"secondary_y": False}, {"secondary_y": False}],
+               [{"secondary_y": False}, {"secondary_y": False}]]
+    )
     
-    # Analisis Statistik untuk Menentukan Metode
-    std_dev = series.std()
-    diff_abs = np.abs(series.diff().fillna(0))
-    mean_val = series.mean()
+    # Plot 1: Original vs Auto-cleaned
+    fig.add_trace(
+        go.Scatter(x=time_idx[:500], y=col_data.values[:500], 
+                  name='Original', line=dict(color='red', dash='dash')),
+        row=1, col=1
+    )
+    fig.add_trace(
+        go.Scatter(x=time_idx[:500], y=cleaned_data[:500], 
+                  name=f'Auto-Cleaned ({method})', line=dict(color='green')),
+        row=1, col=1
+    )
     
-    # Kasus A: Banyak Spikes/Noise Tajam (TSS, Salinitas, Turbiditas kotor)
-    if diff_abs.max() > (3.5 * std_dev):
-        window = max(3, len(series) // 50)
-        processed = series.rolling(window=window, center=True).mean().bfill().ffill()
-        method, color = "Moving Average (Smoothing)", "#00ff88"
-        desc = f"Sistem mendeteksi lonjakan tajam (noise). Menggunakan perataan jendela {window} poin."
+    # Plot 2: Comparison
+    colors = px.colors.qualitative.Set1
+    for i, (name, data) in enumerate(methods.items()):
+        if i < 6:  # Limit traces
+            fig.add_trace(
+                go.Scatter(x=time_idx[:300], y=data[:300], 
+                          name=name, line=dict(color=colors[i % len(colors)])),
+                row=1, col=2
+            )
     
-    # Kasus B: Sinyal Osilasi (Pasut, Gelombang, Tekanan)
-    elif std_dev > 0.05 and len(series) > 50:
-        # Low-pass Butterworth filter
-        b, a = signal.butter(2, 0.1, btype='low')
-        processed = signal.filtfilt(b, a, series)
-        method, color = "Low-Pass Butterworth Filter", "#00d1ff"
-        desc = "Sistem mendeteksi pola osilasi. Membuang riak frekuensi tinggi agar tren utama terlihat."
+    # Plot 3: Spectrum
+    freq = fftfreq(256, 1)[:128]
+    spectrum_orig = np.abs(fft(col_data.values[:256]))[:128]
+    spectrum_clean = np.abs(fft(cleaned_data[:256]))[:128]
     
-    # Kasus C: Tren Linier/Drift (Suhu, Penurunan Muka Tanah)
-    else:
-        x = np.arange(len(series)).reshape(-1, 1)
-        model = LinearRegression().fit(x, series.values)
-        processed = model.predict(x)
-        method, color = "Linear Curve Fitting (Trend)", "#ffea00"
-        desc = "Sistem mendeteksi tren perubahan jangka panjang tanpa osilasi besar."
+    fig.add_trace(
+        go.Scatter(x=freq, y=spectrum_orig, name='Original Spectrum'),
+        row=2, col=1
+    )
+    fig.add_trace(
+        go.Scatter(x=freq, y=spectrum_clean, name='Cleaned Spectrum'),
+        row=2, col=1
+    )
+    
+    # Plot 4: Residuals
+    residuals = col_data.values[:300] - cleaned_data[:300]
+    fig.add_trace(
+        go.Scatter(x=time_idx[:300], y=residuals, 
+                  name='Residuals', line=dict(color='purple')),
+        row=2, col=2
+    )
+    
+    fig.update_layout(height=700, showlegend=True, 
+                     title_text=f"📊 {selected_col} - Noise Analysis")
+    return fig, cleaned_data, method
 
-    return series, processed, method, color, desc, gap_count
-
-# --- TAMPILAN UTAMA ---
-st.title("🌊 Ocean Dynamics Hub")
-st.markdown("*Platform Analisis Cerdas untuk Parameter Oseanografi & Lingkungan Laut*")
-st.write("---")
-
-# --- SIDEBAR & UPLOAD ---
-with st.sidebar:
-    st.header("📂 Pusat Data")
-    uploaded_file = st.file_uploader("Unggah CSV atau Excel", type=['csv', 'xlsx'])
-    st.markdown("---")
-    st.info("💡 **Tips:** Sistem ini akan otomatis mendeteksi baris data dan memilih metode pembersihan terbaik.")
-
-if uploaded_file:
+# Main App
+def main():
+    st.sidebar.header("📁 **Upload Data**")
+    
+    uploaded_file = st.sidebar.file_uploader(
+        "Pilih CSV/XLSX", type=['csv', 'xlsx'],
+        help="Upload data water level, salinitas, atau suhu"
+    )
+    
+    if not uploaded_file:
+        st.info("👆 Upload file CSV/XLSX untuk memulai")
+        st.stop()
+    
+    # Load data
     try:
-        # Membaca file dengan deteksi baris data otomatis (Header-Agnostic)
         if uploaded_file.name.endswith('.csv'):
-            raw_lines = uploaded_file.read().decode('utf-8', errors='ignore').splitlines()
-            # Mencari kata kunci [Data] atau Date untuk melewati header alat
-            start_idx = next((i for i, line in enumerate(raw_lines) if "[Data]" in line or "Date" in line), -1)
-            uploaded_file.seek(0)
-            df = pd.read_csv(uploaded_file, skiprows=start_idx+1 if start_idx != -1 else 0)
+            df = pd.read_csv(uploaded_file)
         else:
             df = pd.read_excel(uploaded_file)
-
-        # Bersihkan nama kolom
-        df.columns = [str(c).strip() for c in df.columns]
-
-        # 1. PREVIEW DATA
-        with st.expander("🔍 Pratinjau Data Mentah", expanded=True):
-            st.dataframe(df.head(10), use_container_width=True)
-            st.caption(f"Terdeteksi {df.shape[0]} baris data.")
-
-        # 2. KONFIGURASI VARIABEL
-        st.subheader("⚙️ Pengaturan Grafik")
-        col_x, col_y, col_btn = st.columns([2, 2, 1])
         
-        with col_x:
-            x_axis = st.selectbox("Pilih Sumbu X (Waktu/Index):", df.columns)
-        with col_y:
-            numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-            y_axis = st.selectbox("Pilih Parameter (Sumbu Y):", numeric_cols if numeric_cols else df.columns)
-        with col_btn:
-            st.write(" ") # Spacer
-            run_btn = st.button("🚀 ANALISIS SEKARANG")
-
-        if run_btn:
-            # Jalankan Smart Cleaner
-            raw_data, clean_data, method_name, line_color, info_text, gaps = smart_cleaner(df[y_axis])
-            
-            # 3. VISUALISASI INTERAKTIF
-            fig = go.Figure()
-            # Data Mentah (Abu-abu Transparan)
-            fig.add_trace(go.Scatter(x=df[x_axis], y=raw_data, name="Data Mentah (Noise)", 
-                                     line=dict(color='rgba(150,150,150,0.3)', width=1)))
-            # Data Bersih (Warna sesuai metode)
-            fig.add_trace(go.Scatter(x=df[x_axis], y=clean_data, name=f"Cleaned ({method_name})", 
-                                     line=dict(color=line_color, width=3)))
-            
-            fig.update_layout(
-                title=f"Perbandingan Data: {y_axis} vs {x_axis}",
-                xaxis_title=x_axis, yaxis_title=y_axis,
-                template="plotly_dark", height=500, hovermode="x unified"
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-            # 4. LAPORAN HASIL
-            st.subheader("📋 Laporan Analisis")
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Metode Terpilih", method_name)
-            m2.metric("Nilai Rata-rata", f"{np.mean(clean_data):.2f}")
-            m3.metric("Data Kosong Diisi", f"{gaps} titik")
-            m4.metric("Stabilitas Sinyal", "Stabil" if gaps < (len(df)*0.1) else "Banyak Gap")
-            
-            st.success(f"**Kenapa metode ini dipilih?** {info_text}")
-
+        # Auto clean numeric rows
+        for i in range(min(10, len(df))):
+            if df.iloc[i].apply(lambda x: pd.api.types.is_numeric_dtype(type(x)) or pd.isna(x)).all():
+                df = df.iloc[i:].reset_index(drop=True)
+                break
+        
+        df_numeric = df.select_dtypes(include=[np.number]).dropna()
+        
+        processor = HydroDataProcessor(df_numeric)
+        
+        st.sidebar.success(f"✅ Data loaded: {len(df_numeric)} rows")
+        st.sidebar.dataframe(df_numeric.head())
+        
     except Exception as e:
-        st.error(f"⚠️ Terjadi kesalahan: {str(e)}")
-else:
-    st.info("Silakan unggah file data oseanografi Anda untuk memulai pemrosesan.")
-    # Opsional: Tampilkan gambar ilustrasi jika belum ada data
+        st.error(f"❌ Error: {str(e)}")
+        st.stop()
+    
+    # Main content
+    tab1, tab2, tab3 = st.tabs(["📈 **Visualisasi**", "🧹 **Auto Clean**", "⚙️ **Manual Tools**"])
+    
+    with tab1:
+        st.header("📈 **Visualisasi Data**")
+        
+        col_options = {k: v for k, v in processor.detected_columns.items()}
+        selected_col = st.selectbox(
+            "Pilih Parameter",
+            options=list(col_options.keys()),
+            format_func=lambda x: f"{x} ({col_options[x]})"
+        )
+        
+        if st.button("🎨 **Generate Visualisasi**", type="primary"):
+            fig, _, _ = create_visualization(df_numeric, processor, selected_col)
+            st.plotly_chart(fig, use_container_width=True)
+    
+    with tab2:
+        st.header("🧹 **Auto Noise Removal**")
+        
+        selected_col_auto = st.selectbox(
+            "Parameter untuk Auto-Clean",
+            options=list(processor.detected_columns.keys())
+        )
+        
+        if st.button("🧠 **Auto Clean & Download**", type="primary"):
+            col_data = df_numeric[selected_col_auto].dropna()
+            time_idx = np.arange(len(col_data))
+            
+            cleaned_data, method = processor.auto_noise_removal(col_data.values, time_idx)
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Noise Reduction", f"{100*(1-np.std(cleaned_data)/np.std(col_data)):.1f}%")
+            with col2:
+                st.metric("Method Used", method)
+            with col3:
+                st.metric("Data Points", f"{len(cleaned_data):,}")
+            
+            # Before/After plot
+            fig_after = go.Figure()
+            fig_after.add_trace(go.Scatter(
+                x=time_idx[:1000], y=col_data.values[:1000], 
+                name='Before', line=dict(color='orange', dash='dash')
+            ))
+            fig_after.add_trace(go.Scatter(
+                x=time_idx[:1000], y=cleaned_data[:1000], 
+                name='After', line=dict(color='blue')
+            ))
+            fig_after.update_layout(title="Before vs After Auto-Cleaning")
+            st.plotly_chart(fig_after, use_container_width=True)
+            
+            # Download
+            df_clean = df_numeric.copy()
+            df_clean[selected_col_auto] = cleaned_data[:len(df_clean)]
+            csv = df_clean.to_csv(index=False)
+            st.download_button(
+                "💾 Download Cleaned Data",
+                csv,
+                f"cleaned_{selected_col_auto}.csv",
+                "text/csv"
+            )
+    
+    with tab3:
+        st.header("⚙️ **Manual Cleaning Tools**")
+        
+        col_manual = st.selectbox("Pilih Kolom", df_numeric.columns)
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            method = st.selectbox("Metode", [
+                "Moving Average", "Low-pass Filter", "High-pass Filter",
+                "Band-pass Filter", "Interpolation", "Outlier Removal"
+            ])
+        with col2:
+            param = st.slider("Parameter", 1, 20, 5)
+        
+        if st.button("🛠️ **Apply Manual Clean**"):
+            data = df_numeric[col_manual].dropna().values
+            
+            if method == "Moving Average":
+                result = processor.moving_average(data, window=param)
+            elif method == "Low-pass Filter":
+                result = processor.low_pass_filter(data, cutoff=param/100)
+            elif method == "High-pass Filter":
+                result = processor.high_pass_filter(data, cutoff=param/100)
+            elif method == "Band-pass Filter":
+                result = processor.band_pass_filter(data, lowcut=0.05, highcut=param/100)
+            elif method == "Interpolation":
+                result = processor.interpolate_data(data)
+            else:  # Outlier Removal
+                result = processor.remove_outliers(data)
+            
+            # Plot result
+            fig_manual = go.Figure()
+            fig_manual.add_trace(go.Scatter(
+                x=np.arange(len(data)), y=data, name='Original'
+            ))
+            fig_manual.add_trace(go.Scatter(
+                x=np.arange(len(result)), y=result, name=f'{method} (param={param})'
+            ))
+            st.plotly_chart(fig_manual)
+
+if __name__ == "__main__":
+    main()
