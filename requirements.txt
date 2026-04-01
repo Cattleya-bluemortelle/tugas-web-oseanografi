@@ -1,6 +1,9 @@
 streamlit
 pandas
 numpy
-matplotlib
+plotly
 scipy
+fuzzywuzzy
+python-Levenshtein
+scikit-learn
 openpyxl
