@@ -75,19 +75,16 @@ class HydroDataProcessor:
     
     def auto_noise_removal(self, data, time):
         """Sistem otomatis pilih metode terbaik untuk noise removal"""
-        # Deteksi tipe noise
         outliers_iqr = np.sum(self.detect_outliers(data, 'iqr'))
-        outliers_zscore = np.sum(self.detect_outliers(data, 'zscore'))
         data_std = np.std(np.diff(data))
         
-        # Strategi otomatis
-        if outliers_iqr > len(data) * 0.1:  # Banyak outlier
+        if outliers_iqr > len(data) * 0.1:  
             cleaned = self.remove_outliers(data.copy())
             method = "Outlier Removal (IQR)"
-        elif data_std > np.std(data) * 0.5:  # High frequency noise
+        elif data_std > np.std(data) * 0.5:  
             cleaned = self.low_pass_filter(data, fs=1.0)
             method = "Low-pass Filter"
-        else:  # Mild noise
+        else:  
             cleaned = self.moving_average(data, window=5)
             method = "Moving Average"
         
@@ -98,11 +95,13 @@ class HydroDataProcessor:
         outliers = self.detect_outliers(data)
         data_clean = data.copy()
         data_clean[outliers] = np.nan
-        return pd.Series(data_clean).interpolate(method='linear').values
+        # Perbaikan fillna di sini
+        return pd.Series(data_clean).interpolate(method='linear').bfill().ffill().values
     
     def moving_average(self, data, window=5):
-        """Moving average smoothing"""
-        return pd.Series(data).rolling(window=window, center=True).mean().fillna(method='bfill').fillna(method='ffill').values
+        """Moving average smoothing - FIXED Pandas 2.0+ compatible"""
+        # Perbaikan fillna di sini
+        return pd.Series(data).rolling(window=window, center=True).mean().bfill().ffill().values
     
     def low_pass_filter(self, data, cutoff=0.1, fs=1.0):
         """Low-pass Butterworth filter"""
@@ -127,8 +126,9 @@ class HydroDataProcessor:
         return signal.filtfilt(b, a, data)
     
     def interpolate_data(self, data):
-        """Interpolasi linear"""
-        return pd.Series(data).interpolate(method='linear').fillna(method='bfill').fillna(method='ffill').values
+        """Interpolasi linear - FIXED Pandas 2.0+ compatible"""
+        # Perbaikan fillna di sini
+        return pd.Series(data).interpolate(method='linear').bfill().ffill().values
     
     def curve_fit_sine(self, x, y):
         """Curve fitting dengan fungsi sine"""
@@ -146,10 +146,8 @@ def create_visualization(df, processor, selected_col):
     col_data = df[selected_col].dropna()
     time_idx = np.arange(len(col_data))
     
-    # Auto cleaning
     cleaned_data, method = processor.auto_noise_removal(col_data.values, time_idx)
     
-    # Multiple methods untuk comparison
     methods = {
         'Original': col_data.values,
         f'Auto-Clean ({method})': cleaned_data,
@@ -158,7 +156,6 @@ def create_visualization(df, processor, selected_col):
         'Interpolation': processor.interpolate_data(col_data.values)
     }
     
-    # Plot
     fig = make_subplots(
         rows=2, cols=2,
         subplot_titles=('Data Original vs Auto-Cleaned', 'Comparison Methods', 
@@ -175,19 +172,18 @@ def create_visualization(df, processor, selected_col):
     )
     fig.add_trace(
         go.Scatter(x=time_idx[:500], y=cleaned_data[:500], 
-                  name=f'Auto-Cleaned ({method})', line=dict(color='green')),
+                  name=f'Auto-Cleaned', line=dict(color='green')),
         row=1, col=1
     )
     
     # Plot 2: Comparison
     colors = px.colors.qualitative.Set1
     for i, (name, data) in enumerate(methods.items()):
-        if i < 6:  # Limit traces
-            fig.add_trace(
-                go.Scatter(x=time_idx[:300], y=data[:300], 
-                          name=name, line=dict(color=colors[i % len(colors)])),
-                row=1, col=2
-            )
+        fig.add_trace(
+            go.Scatter(x=time_idx[:300], y=data[:300], 
+                      name=name, line=dict(color=colors[i % len(colors)])),
+            row=1, col=2
+        )
     
     # Plot 3: Spectrum
     freq = fftfreq(256, 1)[:128]
@@ -212,10 +208,9 @@ def create_visualization(df, processor, selected_col):
     )
     
     fig.update_layout(height=700, showlegend=True, 
-                     title_text=f"📊 {selected_col} - Noise Analysis")
+                      title_text=f"📊 {selected_col} - Noise Analysis")
     return fig, cleaned_data, method
 
-# Main App
 def main():
     st.sidebar.header("📁 **Upload Data**")
     
@@ -228,42 +223,41 @@ def main():
         st.info("👆 Upload file CSV/XLSX untuk memulai")
         st.stop()
     
-    # Load data
     try:
         if uploaded_file.name.endswith('.csv'):
             df = pd.read_csv(uploaded_file)
         else:
             df = pd.read_excel(uploaded_file)
         
-        # Auto clean numeric rows
+        # Cari baris data numerik
         for i in range(min(10, len(df))):
             if df.iloc[i].apply(lambda x: pd.api.types.is_numeric_dtype(type(x)) or pd.isna(x)).all():
                 df = df.iloc[i:].reset_index(drop=True)
                 break
         
         df_numeric = df.select_dtypes(include=[np.number]).dropna()
-        
         processor = HydroDataProcessor(df_numeric)
         
         st.sidebar.success(f"✅ Data loaded: {len(df_numeric)} rows")
-        st.sidebar.dataframe(df_numeric.head())
         
     except Exception as e:
-        st.error(f"❌ Error: {str(e)}")
+        st.error(f"❌ Error loading: {str(e)}")
         st.stop()
     
-    # Main content
     tab1, tab2, tab3 = st.tabs(["📈 **Visualisasi**", "🧹 **Auto Clean**", "⚙️ **Manual Tools**"])
     
     with tab1:
         st.header("📈 **Visualisasi Data**")
-        
-        col_options = {k: v for k, v in processor.detected_columns.items()}
-        selected_col = st.selectbox(
-            "Pilih Parameter",
-            options=list(col_options.keys()),
-            format_func=lambda x: f"{x} ({col_options[x]})"
-        )
+        col_options = processor.detected_columns
+        if not col_options:
+            st.warning("Tidak ada kolom numerik yang terdeteksi secara otomatis.")
+            selected_col = st.selectbox("Pilih Parameter Secara Manual", df_numeric.columns)
+        else:
+            selected_col = st.selectbox(
+                "Pilih Parameter",
+                options=list(col_options.keys()),
+                format_func=lambda x: f"{x} ({col_options[x]})"
+            )
         
         if st.button("🎨 **Generate Visualisasi**", type="primary"):
             fig, _, _ = create_visualization(df_numeric, processor, selected_col)
@@ -271,89 +265,47 @@ def main():
     
     with tab2:
         st.header("🧹 **Auto Noise Removal**")
-        
-        selected_col_auto = st.selectbox(
-            "Parameter untuk Auto-Clean",
-            options=list(processor.detected_columns.keys())
-        )
+        selected_col_auto = st.selectbox("Parameter untuk Auto-Clean", df_numeric.columns)
         
         if st.button("🧠 **Auto Clean & Download**", type="primary"):
             col_data = df_numeric[selected_col_auto].dropna()
-            time_idx = np.arange(len(col_data))
+            cleaned_data, method = processor.auto_noise_removal(col_data.values, np.arange(len(col_data)))
             
-            cleaned_data, method = processor.auto_noise_removal(col_data.values, time_idx)
-            
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Noise Reduction", f"{100*(1-np.std(cleaned_data)/np.std(col_data)):.1f}%")
-            with col2:
-                st.metric("Method Used", method)
-            with col3:
-                st.metric("Data Points", f"{len(cleaned_data):,}")
-            
-            # Before/After plot
-            fig_after = go.Figure()
-            fig_after.add_trace(go.Scatter(
-                x=time_idx[:1000], y=col_data.values[:1000], 
-                name='Before', line=dict(color='orange', dash='dash')
-            ))
-            fig_after.add_trace(go.Scatter(
-                x=time_idx[:1000], y=cleaned_data[:1000], 
-                name='After', line=dict(color='blue')
-            ))
-            fig_after.update_layout(title="Before vs After Auto-Cleaning")
-            st.plotly_chart(fig_after, use_container_width=True)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Noise Reduction", f"{100*(1-np.std(cleaned_data)/np.std(col_data.values)):.1f}%")
+            c2.metric("Method Used", method)
+            c3.metric("Data Points", f"{len(cleaned_data):,}")
             
             # Download
             df_clean = df_numeric.copy()
-            df_clean[selected_col_auto] = cleaned_data[:len(df_clean)]
+            df_clean[selected_col_auto] = cleaned_data
             csv = df_clean.to_csv(index=False)
-            st.download_button(
-                "💾 Download Cleaned Data",
-                csv,
-                f"cleaned_{selected_col_auto}.csv",
-                "text/csv"
-            )
+            st.download_button("💾 Download Cleaned Data", csv, f"cleaned_{selected_col_auto}.csv", "text/csv")
     
     with tab3:
         st.header("⚙️ **Manual Cleaning Tools**")
-        
-        col_manual = st.selectbox("Pilih Kolom", df_numeric.columns)
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            method = st.selectbox("Metode", [
-                "Moving Average", "Low-pass Filter", "High-pass Filter",
-                "Band-pass Filter", "Interpolation", "Outlier Removal"
-            ])
-        with col2:
-            param = st.slider("Parameter", 1, 20, 5)
+        col_manual = st.selectbox("Pilih Kolom", df_numeric.columns, key="manual_sel")
+        m_col1, m_col2 = st.columns(2)
+        with m_col1:
+            method_manual = st.selectbox("Metode", ["Moving Average", "Low-pass Filter", "Interpolation", "Outlier Removal"])
+        with m_col2:
+            param = st.slider("Intensity Parameter", 1, 50, 5)
         
         if st.button("🛠️ **Apply Manual Clean**"):
-            data = df_numeric[col_manual].dropna().values
+            data = df_numeric[col_manual].values
+            if method_manual == "Moving Average":
+                res = processor.moving_average(data, window=param)
+            elif method_manual == "Low-pass Filter":
+                res = processor.low_pass_filter(data, cutoff=param/100)
+            elif method_manual == "Interpolation":
+                res = processor.interpolate_data(data)
+            else:
+                res = processor.remove_outliers(data)
             
-            if method == "Moving Average":
-                result = processor.moving_average(data, window=param)
-            elif method == "Low-pass Filter":
-                result = processor.low_pass_filter(data, cutoff=param/100)
-            elif method == "High-pass Filter":
-                result = processor.high_pass_filter(data, cutoff=param/100)
-            elif method == "Band-pass Filter":
-                result = processor.band_pass_filter(data, lowcut=0.05, highcut=param/100)
-            elif method == "Interpolation":
-                result = processor.interpolate_data(data)
-            else:  # Outlier Removal
-                result = processor.remove_outliers(data)
-            
-            # Plot result
-            fig_manual = go.Figure()
-            fig_manual.add_trace(go.Scatter(
-                x=np.arange(len(data)), y=data, name='Original'
-            ))
-            fig_manual.add_trace(go.Scatter(
-                x=np.arange(len(result)), y=result, name=f'{method} (param={param})'
-            ))
-            st.plotly_chart(fig_manual)
+            fig_m = go.Figure()
+            fig_m.add_trace(go.Scatter(y=data[:1000], name='Original', line=dict(color='gray')))
+            fig_m.add_trace(go.Scatter(y=res[:1000], name='Cleaned', line=dict(color='cyan')))
+            st.plotly_chart(fig_m)
 
 if __name__ == "__main__":
     main()
