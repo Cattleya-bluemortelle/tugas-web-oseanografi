@@ -1,9 +1,9 @@
 streamlit
-pandas
+pandas>=2.0.0
 numpy
 plotly
 scipy
 scikit-learn
-openpyxl
 fuzzywuzzy
 python-Levenshtein
+openpyxl
